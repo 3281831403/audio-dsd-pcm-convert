@@ -35,7 +35,15 @@ def bitstream_to_pulses(bits):
     半个 LSB 的直流偏移，后续抽取输出的基线就不在 0 上了。
     出现 0/1 以外的值抛 ValueError。
     """
-    raise NotImplementedError("bitstream_to_pulses is not implemented yet")
+    pulses = []
+    for bit in bits:
+        if bit == 1:
+            pulses.append(1.0)
+        elif bit == 0:
+            pulses.append(-1.0)
+        else:
+            raise ValueError(f"bitstream values must be 0 or 1, got {bit!r}")
+    return pulses
 
 
 def moving_average(x, n):
@@ -59,7 +67,18 @@ def moving_average(x, n):
     因果实现 y[k] = mean(x[k:k+n]) 自带 (n-1)/2 个样本的群延迟，会和
     FIR 低通路径对不齐；这里必须把窗口中心对齐到输出下标 i。
     """
-    raise NotImplementedError("moving_average is not implemented yet")
+    if not isinstance(n, int) or n <= 0 or n % 2 == 0:
+        raise ValueError(f"n must be a positive odd integer, got {n!r}")
+    x = list(x)
+    half = (n - 1) // 2
+    out = []
+    for i in range(len(x)):
+        total = 0.0
+        for j in range(i - half, i + half + 1):
+            if 0 <= j < len(x):
+                total += x[j]
+        out.append(total / n)
+    return out
 
 
 def fir_lowpass(taps, cutoff):
@@ -88,7 +107,30 @@ def fir_lowpass(taps, cutoff):
     Blackman 窗可以把该频段压到 -60 dB 以下。系数若不归一，直流增益
     会偏离 1，PCM 电平就会整体偏大或偏小。
     """
-    raise NotImplementedError("fir_lowpass is not implemented yet")
+    if not isinstance(taps, int) or taps <= 0 or taps % 2 == 0:
+        raise ValueError(f"taps must be a positive odd integer, got {taps!r}")
+    if not 0.0 < cutoff < 1.0:
+        raise ValueError(f"cutoff must satisfy 0 < cutoff < 1, got {cutoff!r}")
+
+    n = taps
+    m = (n - 1) / 2.0
+    fc = cutoff / 2.0  # cycles/sample，1.0 对应采样率
+    coeffs = []
+    for k in range(n):
+        d = k - m
+        if d == 0.0:
+            ideal = 2.0 * fc
+        else:
+            ideal = math.sin(2.0 * math.pi * fc * d) / (math.pi * d)
+        window = (
+            0.42
+            - 0.5 * math.cos(2.0 * math.pi * k / (n - 1))
+            + 0.08 * math.cos(4.0 * math.pi * k / (n - 1))
+        )
+        coeffs.append(ideal * window)
+
+    total = sum(coeffs)
+    return [c / total for c in coeffs]
 
 
 def decimate(x, factor, taps):
@@ -117,7 +159,28 @@ def decimate(x, factor, taps):
     直接混叠进音频带。输出长度也不能写成 len(x)//factor，否则最后
     一个不完整抽取块里的样本会被丢掉。
     """
-    raise NotImplementedError("decimate is not implemented yet")
+    x = list(x)
+    taps = list(taps)
+    if not isinstance(factor, int) or factor <= 0:
+        raise ValueError(f"factor must be a positive integer, got {factor!r}")
+    if not x:
+        return []
+
+    half = (len(taps) - 1) // 2
+    last = len(x) - 1
+    out = []
+    for m in range(math.ceil(len(x) / factor)):
+        center = m * factor
+        acc = 0.0
+        for k, coeff in enumerate(taps):
+            j = center + k - half
+            if j < 0:
+                j = 0
+            elif j > last:
+                j = last
+            acc += coeff * x[j]
+        out.append(acc)
+    return out
 
 
 def dc_gain(taps):
@@ -138,7 +201,7 @@ def dc_gain(taps):
     不能用 max(taps) 代替求和；最大系数只是通带中心附近的峰值，
     会把直流增益低估好几倍。
     """
-    raise NotImplementedError("dc_gain is not implemented yet")
+    return float(sum(taps))
 
 
 def passband_ripple(taps, freqs):
@@ -164,7 +227,24 @@ def passband_ripple(taps, freqs):
     |H(f)|。直接把 Hz 当作归一化频率会让通带与阻带的位置整体错位，
     1 kHz 会被当成几千个周期/样本。
     """
-    raise NotImplementedError("passband_ripple is not implemented yet")
+    taps = list(taps)
+    freqs = list(freqs)
+    if not freqs:
+        return 0.0
+
+    def _response_db(freq):
+        omega = 2.0 * math.pi * freq / DSD64_RATE
+        real = 0.0
+        imag = 0.0
+        for k, coeff in enumerate(taps):
+            real += coeff * math.cos(omega * k)
+            imag -= coeff * math.sin(omega * k)
+        magnitude = math.hypot(real, imag)
+        return 20.0 * math.log10(max(magnitude, 1e-300))
+
+    dc = _response_db(0.0)
+    levels = [_response_db(f) - dc for f in freqs]
+    return max(levels) - min(levels)
 
 
 def validate_taps(taps, factor):
@@ -195,7 +275,15 @@ def validate_taps(taps, factor):
     偶数长度的 taps 无法满足 Type-I 线性相位假设，群延迟也不再是
     整数个样本；不检查这一点会让后续对齐整体错开半个样本。
     """
-    raise NotImplementedError("validate_taps is not implemented yet")
+    errors = []
+    taps = list(taps)
+    if len(taps) == 0 or len(taps) % 2 == 0:
+        errors.append(f"taps length must be odd, got {len(taps)}")
+    if abs(sum(taps) - 1.0) > 1e-6:
+        errors.append(f"taps must be normalized: sum(taps)={sum(taps):.12g}")
+    if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
+        errors.append(f"factor must be a positive integer, got {factor!r}")
+    return errors
 
 
 def dsd_batch(streams, config):
@@ -219,4 +307,9 @@ def dsd_batch(streams, config):
     每条流必须使用独立的滤波器状态/历史。不能把上一条流的尾部
     接着喂给下一条流，否则第二条流的开头会串进第一条流的声音。
     """
-    raise NotImplementedError("dsd_batch is not implemented yet")
+    taps = config["taps"]
+    factor = config["factor"]
+    return {
+        name: decimate(bitstream_to_pulses(bits), factor, taps)
+        for name, bits in streams.items()
+    }
